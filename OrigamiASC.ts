@@ -2,183 +2,201 @@ import {
   Args,
   stringToBytes,
   bytesToString,
-  u32ToBytes,
-  bytesToU32,
+  u256ToBytes,
+  bytesToU256,
   u64ToBytes,
   bytesToU64,
+  u32ToBytes,
+  bytesToU32,
 } from '@massalabs/as-types';
 import {
   _transferFrom,
 } from './NFT-internals';
-import { 
+import {
   Storage,
+  generateEvent,
   transferCoins,
   Address,
-  scheduleCall,
   Context,
 } from '@massalabs/massa-as-sdk';
 import { u256 } from 'as-bignum/assembly';
+import { Random } from '@massalabs/as-sdk';
 
 /**
- * Constants for timing and initial settings
+ * Constants for the game
  */
-const TICKET_PRICE = u64(5 * 1e9); // Initial price in MAS (5 MAS)
-const PRICE_INCREMENT = u64(0.2 * 1e9); // Increment per ticket (0.2 MAS)
 const TOTAL_TICKETS = 200;
-const RESERVE_AMOUNT = u64(100 * 1e9); // 100 MAS reserve
-const SMALL_WIN_PERCENTAGE = u64(20); // 20% for small wins
-const MAIN_WIN_PERCENTAGE = u64(80); // 80% for main wins
-const SMALL_WIN_INTERVAL = 5 * 86400000; // 5 days in milliseconds
-const END_DATE = 30 * 86400000; // 30 days in milliseconds
+const INITIAL_TICKET_PRICE = 5000000000; // 5 MAS
+const TICKET_PRICE_INCREMENT = 200000000; // 0.2 MAS
+const RESERVE_AMOUNT = 100000000000; // 100 MAS
+const END_DATE_OFFSET = 2592000000; // 30 days in milliseconds
 
 // Contract keys
-const TOTAL_SALES_KEY = stringToBytes('TOTAL_SALES');
+const RESERVE_KEY = stringToBytes('RESERVE');
+const TICKET_SALES_KEY = stringToBytes('TICKET_SALES');
+const LAST_TICKET_SOLD_TIMESTAMP_KEY = stringToBytes('LAST_TICKET_SOLD');
 const CURRENT_TICKET_PRICE_KEY = stringToBytes('CURRENT_TICKET_PRICE');
-const LAST_EXECUTION_KEY = stringToBytes('LAST_EXECUTION');
-const MAIN_PRIZE_POOL_KEY = stringToBytes('MAIN_PRIZE_POOL');
-const SMALL_PRIZE_POOL_KEY = stringToBytes('SMALL_PRIZE_POOL');
 const RED_NFT_KEY = stringToBytes('RED_NFT');
 const GREEN_NFT_KEY = stringToBytes('GREEN_NFT');
 const BLUE_NFT_KEY = stringToBytes('BLUE_NFT');
-const START_TIME_KEY = stringToBytes('START_TIME');
+const SMALL_PRIZES_KEY = stringToBytes('SMALL_PRIZES');
+const MAIN_PRIZES_KEY = stringToBytes('MAIN_PRIZES');
+const LAST_EXECUTION_KEY = stringToBytes('LAST_EXECUTION');
 
-// Initialization
-export function initialize(): void {
-  Storage.set(TOTAL_SALES_KEY, u64ToBytes(0));
-  Storage.set(CURRENT_TICKET_PRICE_KEY, u64ToBytes(TICKET_PRICE));
-  Storage.set(MAIN_PRIZE_POOL_KEY, u64ToBytes(0));
-  Storage.set(SMALL_PRIZE_POOL_KEY, u64ToBytes(0));
-  Storage.set(START_TIME_KEY, u64ToBytes(Context.timestamp().toU64()));
+// Struct to hold prize pool details
+class PrizePool {
+  smallPrizePool: u256;
+  mainPrizePool: u256;
+
+  constructor() {
+    this.smallPrizePool = u256.Zero;
+    this.mainPrizePool = u256.Zero;
+  }
+
+  serialize(): StaticArray<u8> {
+    const args = new Args();
+    args.addU256(this.smallPrizePool);
+    args.addU256(this.mainPrizePool);
+    return args.serialize();
+  }
+
+  static deserialize(data: StaticArray<u8>): PrizePool {
+    const args = new Args(data);
+    const smallPrizePool = args.nextU256().unwrap();
+    const mainPrizePool = args.nextU256().unwrap();
+    return new PrizePool(smallPrizePool, mainPrizePool);
+  }
 }
 
+// Initializes the contract, setting initial values
+export function constructor(): void {
+  Storage.set(TICKET_SALES_KEY, u64ToBytes(0));
+  Storage.set(RESERVE_KEY, u64ToBytes(0));
+  Storage.set(CURRENT_TICKET_PRICE_KEY, u256ToBytes(new u256(INITIAL_TICKET_PRICE)));
+  Storage.set(SMALL_PRIZES_KEY, (new PrizePool()).serialize());
+  Storage.set(MAIN_PRIZES_KEY, (new PrizePool()).serialize());
+}
 
+// Function to handle ticket purchases
+export function buyTicket(): void {
+  let ticketSales = bytesToU64(Storage.get(TICKET_SALES_KEY));
+  assert(ticketSales < TOTAL_TICKETS, 'All tickets have been sold');
 
-// Buy a ticket
-export function buyTicket(buyer: string): void {
-  let totalSales = bytesToU64(Storage.get(TOTAL_SALES_KEY));
-  let currentPrice = bytesToU64(Storage.get(CURRENT_TICKET_PRICE_KEY));
+  // Update the ticket sales count
+  ticketSales += 1;
+  Storage.set(TICKET_SALES_KEY, u64ToBytes(ticketSales));
 
-  // Increase sales count
-  totalSales += currentPrice;
-  Storage.set(TOTAL_SALES_KEY, u64ToBytes(totalSales));
+  // Determine the current ticket price
+  let ticketPrice = bytesToU256(Storage.get(CURRENT_TICKET_PRICE_KEY));
+
+  // 1 MAS goes to reserve
+  let reserve = bytesToU64(Storage.get(RESERVE_KEY));
+  reserve += 1000000000; // 1 MAS
+  Storage.set(RESERVE_KEY, u64ToBytes(reserve));
+
+  // Remaining amount goes to the prize pools
+  let remainingAmount = ticketPrice.sub(new u256(1000000000)); // subtract 1 MAS for reserve
+  let smallPrizeAmount = remainingAmount.mul(new u256(20)).div(new u256(100)); // 20% to small prize pool
+  let mainPrizeAmount = remainingAmount.sub(smallPrizeAmount); // 80% to main prize pool
 
   // Update prize pools
-  updatePrizePools(totalSales);
+  let prizePool = PrizePool.deserialize(Storage.get(SMALL_PRIZES_KEY));
+  prizePool.smallPrizePool = prizePool.smallPrizePool.add(smallPrizeAmount);
+  Storage.set(SMALL_PRIZES_KEY, prizePool.serialize());
+
+  prizePool = PrizePool.deserialize(Storage.get(MAIN_PRIZES_KEY));
+  prizePool.mainPrizePool = prizePool.mainPrizePool.add(mainPrizeAmount);
+  Storage.set(MAIN_PRIZES_KEY, prizePool.serialize());
 
   // Increase the ticket price for the next buyer
-  currentPrice += PRICE_INCREMENT;
-  Storage.set(CURRENT_TICKET_PRICE_KEY, u64ToBytes(currentPrice));
+  ticketPrice = ticketPrice.add(new u256(TICKET_PRICE_INCREMENT));
+  Storage.set(CURRENT_TICKET_PRICE_KEY, u256ToBytes(ticketPrice));
+
+  // Record the timestamp of this sale
+  Storage.set(LAST_TICKET_SOLD_TIMESTAMP_KEY, u64ToBytes(Context.timestamp()));
 }
 
-// Update the prize pools based on total sales
-function updatePrizePools(totalSales: u64): void {
-  if (totalSales <= RESERVE_AMOUNT) {
-    // Still collecting reserve
-    return;
+// Function to execute daily transfers of NFTs
+export function scheduleDailyExecution(): void {
+  const lastExecution = bytesToU32(Storage.get(LAST_EXECUTION_KEY));
+  const now = Context.timestamp().toU32();
+
+  if (now < bytesToU64(Storage.get(LAST_TICKET_SOLD_TIMESTAMP_KEY)).toU32() + END_DATE_OFFSET && (lastExecution == 0 || now - lastExecution >= 86400000)) {
+    transferNFTs();
+    Storage.set(LAST_EXECUTION_KEY, u32ToBytes(now));
   }
-
-  let remainingSales = totalSales - RESERVE_AMOUNT;
-
-  // Calculate pools
-  let mainPrizePool = remainingSales * MAIN_WIN_PERCENTAGE / 100;
-  let smallPrizePool = remainingSales * SMALL_WIN_PERCENTAGE / 100;
-
-  Storage.set(MAIN_PRIZE_POOL_KEY, u64ToBytes(mainPrizePool));
-  Storage.set(SMALL_PRIZE_POOL_KEY, u64ToBytes(smallPrizePool));
 }
 
+// Function to transfer NFTs to next holders
+function transferNFTs(): void {
+  const holders = getTicketHolders();
+  assert(holders.length > 0, 'No ticket holders available');
 
-
-
-// Distribute main prizes after 30 days
-export function distributeMainPrizes(): void {
-  let now = Context.timestamp().toU64();
-  let startTime = bytesToU64(Storage.get(START_TIME_KEY));
-
-  assert(now >= startTime + END_DATE, 'Main prizes can only be distributed after 30 days');
-
-  let mainPrizePool = bytesToU64(Storage.get(MAIN_PRIZE_POOL_KEY));
-
-  // Distribute to NFT holders
-  distributeToNFT(mainPrizePool, RED_NFT_KEY, 60);
-  distributeToNFT(mainPrizePool, GREEN_NFT_KEY, 30);
-  distributeToNFT(mainPrizePool, BLUE_NFT_KEY, 10);
+  // Transfer NFTs to next holders
+  transferNFT(RED_NFT_KEY, holders);
+  transferNFT(GREEN_NFT_KEY, holders);
+  transferNFT(BLUE_NFT_KEY, holders);
 }
 
-// Distribute small prizes every 5 days
+// Function to distribute small prizes every 5 days
 export function distributeSmallPrizes(): void {
-  let now = Context.timestamp().toU64();
-  let lastExecution = bytesToU64(Storage.get(LAST_EXECUTION_KEY));
+  const now = Context.timestamp().toU32();
+  const lastExecution = bytesToU32(Storage.get(LAST_EXECUTION_KEY));
+  assert(now >= lastExecution + 432000000, 'Not yet time to distribute small prizes');
 
-  if (now >= lastExecution + SMALL_WIN_INTERVAL) {
-    let smallPrizePool = bytesToU64(Storage.get(SMALL_PRIZE_POOL_KEY));
+  const holders = getTicketHolders();
+  assert(holders.length > 0, 'No ticket holders available');
 
-    // Divide by 5 days
-    let dailySmallPrize = smallPrizePool / 5;
+  // Retrieve and distribute small prize pool
+  let prizePool = PrizePool.deserialize(Storage.get(SMALL_PRIZES_KEY));
+  let smallPrize = prizePool.smallPrizePool.div(new u256(5)); // 1/5th of the small prize pool
 
-    // Distribute to NFT holders
-    distributeToNFT(dailySmallPrize, RED_NFT_KEY, 100 / 3);
-    distributeToNFT(dailySmallPrize, GREEN_NFT_KEY, 100 / 3);
-    distributeToNFT(dailySmallPrize, BLUE_NFT_KEY, 100 / 3);
+  // Divide the small prize among current NFT holders
+  transferCoins(new Address(holders[0]), smallPrize.div(new u256(3))); // RED holder
+  transferCoins(new Address(holders[1]), smallPrize.div(new u256(3))); // GREEN holder
+  transferCoins(new Address(holders[2]), smallPrize.div(new u256(3))); // BLUE holder
 
-    // Update last execution time
-    Storage.set(LAST_EXECUTION_KEY, u64ToBytes(now));
-  }
+  // Update the prize pool
+  prizePool.smallPrizePool = prizePool.smallPrizePool.sub(smallPrize);
+  Storage.set(SMALL_PRIZES_KEY, prizePool.serialize());
 }
 
-// Distribute amount to a specific NFT holder based on percentage
-function distributeToNFT(totalAmount: u64, nftKey: StaticArray<u8>, percentage: u64): void {
-  let nftOwner = bytesToString(Storage.get(nftKey));
-  let amount = totalAmount * percentage / 100;
-  transferCoins(new Address(nftOwner), amount);
+// Function to distribute main prizes after 30 days
+export function distributeMainPrizes(): void {
+  const now = Context.timestamp().toU32();
+  const ticketSoldTimestamp = bytesToU64(Storage.get(LAST_TICKET_SOLD_TIMESTAMP_KEY)).toU32();
+  assert(now >= ticketSoldTimestamp + END_DATE_OFFSET, 'It is not yet time to distribute main prizes');
+
+  const holders = getTicketHolders();
+  assert(holders.length > 0, 'No ticket holders available');
+
+  // Retrieve and distribute main prize pool
+  let prizePool = PrizePool.deserialize(Storage.get(MAIN_PRIZES_KEY));
+  let totalMainPrize = prizePool.mainPrizePool;
+
+  // Distribute according to 60% (RED), 30% (GREEN), and 10% (BLUE)
+  transferCoins(new Address(holders[0]), totalMainPrize.mul(new u256(60)).div(new u256(100))); // RED holder
+  transferCoins(new Address(holders[1]), totalMainPrize.mul(new u256(30)).div(new u256(100))); // GREEN holder
+  transferCoins(new Address(holders[2]), totalMainPrize.mul(new u256(10)).div(new u256(100))); // BLUE holder
+
+  // Clear the prize pool
+  prizePool.mainPrizePool = u256.Zero;
+  Storage.set(MAIN_PRIZES_KEY, prizePool.serialize());
 }
 
+// Helper function to transfer an NFT
+function transferNFT(nftKey: StaticArray<u8>, holders: string[]): void {
+  const randomIndex = Random.nextInt(holders.length);
+  const newHolder = holders[randomIndex];
 
+  const nftOwner = bytesToString(Storage.get(nftKey));
+  _transferFrom(nftOwner, newHolder, bytesToU256(Storage.get(nftKey)));
 
-
-// Transfer NFTs to another random ticket holder every day
-export function transferNFTsDaily(): void {
-  let now = Context.timestamp().toU64();
-  let lastExecution = bytesToU64(Storage.get(LAST_EXECUTION_KEY));
-
-  if (now >= lastExecution + 86400000) { // 1 day in milliseconds
-    let totalSales = bytesToU64(Storage.get(TOTAL_SALES_KEY));
-    let currentIndex = (now / 86400000) % (totalSales / TICKET_PRICE); // Modulo operation to cycle through ticket holders
-
-    // Logic to determine the new owner based on currentIndex
-    let newOwner = getNewOwner(currentIndex);
-
-    // Transfer NFTs
-    transferNFT(RED_NFT_KEY, newOwner);
-    transferNFT(GREEN_NFT_KEY, newOwner);
-    transferNFT(BLUE_NFT_KEY, newOwner);
-
-    // Update last execution time
-    Storage.set(LAST_EXECUTION_KEY, u64ToBytes(now));
-  }
+  Storage.set(nftKey, stringToBytes(newHolder));
 }
 
-// Transfer a specific NFT to a new owner
-function transferNFT(nftKey: StaticArray<u8>, newOwner: string): void {
-  let currentOwner = bytesToString(Storage.get(nftKey));
-  _transferFrom(currentOwner, newOwner, bytesToU256(Storage.get(nftKey)));
-  Storage.set(nftKey, stringToBytes(newOwner));
+// Helper function to get all ticket holders
+function getTicketHolders(): string[] {
+  // This function should return an array of addresses that currently hold tickets
+  return ['holder1', 'holder2', 'holder3']; // Placeholder addresses
 }
-
-// Logic to determine new owner from the list of ticket holders
-function getNewOwner(index: u64): string {
-  // Implement logic to get new owner address based on ticket index
-  // This would typically involve storing a mapping of ticket numbers to addresses
-  return ''; // Replace with actual logic
-}
-
-
-
-
-
-
-
-
-
-
-
