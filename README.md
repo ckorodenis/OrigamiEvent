@@ -73,3 +73,4 @@ Small prizes: 20% of the prize pool will be divided into 5 parts, to be paid eve
 3.Ticket price: The price starts at MAS 5 and increases by MAS 0.2 with each ticket sold.
 -----------------------------
 4.NFT transfers Each day NFT Red, Green and Blue are transferred to new random ticket holders.
+-----------------------------
