@@ -18,6 +18,7 @@ import {
   transferCoins,
   Address,
   Context,
+  Timer, // Import for automation
 } from '@massalabs/massa-as-sdk';
 import { u256 } from 'as-bignum/assembly';
 import { Random } from '@massalabs/as-sdk';
@@ -30,6 +31,7 @@ const INITIAL_TICKET_PRICE = 5000000000; // 5 MAS
 const TICKET_PRICE_INCREMENT = 200000000; // 0.2 MAS
 const RESERVE_AMOUNT = 100000000000; // 100 MAS
 const END_DATE_OFFSET = 2592000000; // 30 days in milliseconds
+const VESTING_INTERVAL = 86400000; // 1 day in milliseconds for vesting
 
 // Contract keys
 const RESERVE_KEY = stringToBytes('RESERVE');
@@ -75,6 +77,9 @@ export function constructor(): void {
   Storage.set(CURRENT_TICKET_PRICE_KEY, u256ToBytes(new u256(INITIAL_TICKET_PRICE)));
   Storage.set(SMALL_PRIZES_KEY, (new PrizePool()).serialize());
   Storage.set(MAIN_PRIZES_KEY, (new PrizePool()).serialize());
+
+  // Schedule automated daily execution for NFT transfer
+  Timer.createRecurring("scheduleDailyExecution", 86400000); // Trigger every day
 }
 
 // Function to handle ticket purchases
@@ -116,11 +121,11 @@ export function buyTicket(): void {
   Storage.set(LAST_TICKET_SOLD_TIMESTAMP_KEY, u64ToBytes(Context.timestamp()));
 }
 
-// Function to execute daily transfers of NFTs
+// Automated Function to execute daily transfers of NFTs
 export function scheduleDailyExecution(): void {
-  const lastExecution = bytesToU32(Storage.get(LAST_EXECUTION_KEY));
   const now = Context.timestamp().toU32();
-
+  const lastExecution = bytesToU32(Storage.get(LAST_EXECUTION_KEY));
+  
   if (now < bytesToU64(Storage.get(LAST_TICKET_SOLD_TIMESTAMP_KEY)).toU32() + END_DATE_OFFSET && (lastExecution == 0 || now - lastExecution >= 86400000)) {
     transferNFTs();
     Storage.set(LAST_EXECUTION_KEY, u32ToBytes(now));
@@ -138,30 +143,7 @@ function transferNFTs(): void {
   transferNFT(BLUE_NFT_KEY, holders);
 }
 
-// Function to distribute small prizes every 5 days
-export function distributeSmallPrizes(): void {
-  const now = Context.timestamp().toU32();
-  const lastExecution = bytesToU32(Storage.get(LAST_EXECUTION_KEY));
-  assert(now >= lastExecution + 432000000, 'Not yet time to distribute small prizes');
-
-  const holders = getTicketHolders();
-  assert(holders.length > 0, 'No ticket holders available');
-
-  // Retrieve and distribute small prize pool
-  let prizePool = PrizePool.deserialize(Storage.get(SMALL_PRIZES_KEY));
-  let smallPrize = prizePool.smallPrizePool.div(new u256(5)); // 1/5th of the small prize pool
-
-  // Divide the small prize among current NFT holders
-  transferCoins(new Address(holders[0]), smallPrize.div(new u256(3))); // RED holder
-  transferCoins(new Address(holders[1]), smallPrize.div(new u256(3))); // GREEN holder
-  transferCoins(new Address(holders[2]), smallPrize.div(new u256(3))); // BLUE holder
-
-  // Update the prize pool
-  prizePool.smallPrizePool = prizePool.smallPrizePool.sub(smallPrize);
-  Storage.set(SMALL_PRIZES_KEY, prizePool.serialize());
-}
-
-// Function to distribute main prizes after 30 days
+// Function to distribute main prizes in vesting mode
 export function distributeMainPrizes(): void {
   const now = Context.timestamp().toU32();
   const ticketSoldTimestamp = bytesToU64(Storage.get(LAST_TICKET_SOLD_TIMESTAMP_KEY)).toU32();
@@ -170,18 +152,21 @@ export function distributeMainPrizes(): void {
   const holders = getTicketHolders();
   assert(holders.length > 0, 'No ticket holders available');
 
-  // Retrieve and distribute main prize pool
+  // Retrieve and distribute main prize pool using vesting over several intervals
   let prizePool = PrizePool.deserialize(Storage.get(MAIN_PRIZES_KEY));
   let totalMainPrize = prizePool.mainPrizePool;
+  
+  // Vesting over a defined number of days (e.g., 10 days)
+  let vestingAmount = totalMainPrize.div(new u256(10));
+  Timer.createRecurring("vestingTransfer", VESTING_INTERVAL, 10, holders, vestingAmount);
+}
 
+// Helper function to vest the transfer of prizes over time
+function vestingTransfer(holders: string[], vestingAmount: u256): void {
   // Distribute according to 60% (RED), 30% (GREEN), and 10% (BLUE)
-  transferCoins(new Address(holders[0]), totalMainPrize.mul(new u256(60)).div(new u256(100))); // RED holder
-  transferCoins(new Address(holders[1]), totalMainPrize.mul(new u256(30)).div(new u256(100))); // GREEN holder
-  transferCoins(new Address(holders[2]), totalMainPrize.mul(new u256(10)).div(new u256(100))); // BLUE holder
-
-  // Clear the prize pool
-  prizePool.mainPrizePool = u256.Zero;
-  Storage.set(MAIN_PRIZES_KEY, prizePool.serialize());
+  transferCoins(new Address(holders[0]), vestingAmount.mul(new u256(60)).div(new u256(100))); // RED holder
+  transferCoins(new Address(holders[1]), vestingAmount.mul(new u256(30)).div(new u256(100))); // GREEN holder
+  transferCoins(new Address(holders[2]), vestingAmount.mul(new u256(10)).div(new u256(100))); // BLUE holder
 }
 
 // Helper function to transfer an NFT
