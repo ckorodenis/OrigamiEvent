@@ -18,7 +18,7 @@ import {
   transferCoins,
   Address,
   Context,
-  Timer, // Import for automation
+  sendMessage, // sendMessage import
 } from '@massalabs/massa-as-sdk';
 import { u256 } from 'as-bignum/assembly';
 import { Random } from '@massalabs/as-sdk';
@@ -78,8 +78,8 @@ export function constructor(): void {
   Storage.set(SMALL_PRIZES_KEY, (new PrizePool()).serialize());
   Storage.set(MAIN_PRIZES_KEY, (new PrizePool()).serialize());
 
-  // Schedule automated daily execution for NFT transfer
-  Timer.createRecurring("scheduleDailyExecution", 86400000); // Trigger every day
+  // Schedule automated daily execution for NFT transfer using sendMessage
+  sendMessage(86400000, "scheduleDailyExecution", []); // Trigger every day
 }
 
 // Function to handle ticket purchases
@@ -121,14 +121,17 @@ export function buyTicket(): void {
   Storage.set(LAST_TICKET_SOLD_TIMESTAMP_KEY, u64ToBytes(Context.timestamp()));
 }
 
-// Automated Function to execute daily transfers of NFTs
+// Automated Function to execute daily transfers of NFTs using sendMessage
 export function scheduleDailyExecution(): void {
   const now = Context.timestamp().toU32();
   const lastExecution = bytesToU32(Storage.get(LAST_EXECUTION_KEY));
-  
+
   if (now < bytesToU64(Storage.get(LAST_TICKET_SOLD_TIMESTAMP_KEY)).toU32() + END_DATE_OFFSET && (lastExecution == 0 || now - lastExecution >= 86400000)) {
     transferNFTs();
     Storage.set(LAST_EXECUTION_KEY, u32ToBytes(now));
+
+    // Reschedule the daily execution
+    sendMessage(86400000, "scheduleDailyExecution", []); // Trigger again in 24 hours
   }
 }
 
@@ -158,11 +161,11 @@ export function distributeMainPrizes(): void {
   
   // Vesting over a defined number of days (e.g., 10 days)
   let vestingAmount = totalMainPrize.div(new u256(10));
-  Timer.createRecurring("vestingTransfer", VESTING_INTERVAL, 10, holders, vestingAmount);
+  sendMessage(VESTING_INTERVAL, "vestingTransfer", [holders, vestingAmount]); // Schedule first vesting transfer
 }
 
 // Helper function to vest the transfer of prizes over time
-function vestingTransfer(holders: string[], vestingAmount: u256): void {
+export function vestingTransfer(holders: string[], vestingAmount: u256): void {
   // Distribute according to 60% (RED), 30% (GREEN), and 10% (BLUE)
   transferCoins(new Address(holders[0]), vestingAmount.mul(new u256(60)).div(new u256(100))); // RED holder
   transferCoins(new Address(holders[1]), vestingAmount.mul(new u256(30)).div(new u256(100))); // GREEN holder
